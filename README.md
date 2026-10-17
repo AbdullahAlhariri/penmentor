@@ -5,7 +5,9 @@ A maths mentor at the tip of your pen. Press a key while you work by hand: Claud
 teacher with coloured pens, gives you hints instead of answers, and shows the idea as a 3Blue1Brown-style animation.
 </p>
 
-<p align="center"><img src="docs/showme.gif" alt="Show me: Riemann sums closing in on the integral of sin x from 0 to π" width="760"></p>
+<p align="center"><img src="docs/demo.gif" alt="Writing an integral in xournal++, penmentor marking the sign slip, then animating the area" width="860"><br>
+<sub>Handwriting in xournal++ → one key → the slip is marked on the page → box the integral → an interactive manim animation.
+(<a href="docs/demo.mp4">video</a>; for a repeatable recording the pen is scripted and Claude's answer is a fixed example.)</sub></p>
 
 ## Why I use it
 

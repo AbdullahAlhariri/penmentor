@@ -1,11 +1,8 @@
 """Renders the README's pictures with manim, the way penmentor draws its own:
 
-    ~/.local/share/penmentor/manim/bin/python docs/assets.py      writes docs/banner.png and docs/showme.gif (needs ffmpeg)
+    ~/.local/share/penmentor/manim/bin/python docs/assets.py      writes docs/banner.png
 """
-import shutil
-import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 DOCS = Path(__file__).resolve().parent
@@ -43,34 +40,6 @@ def banner(out):
     scene.get_image().convert('RGB').crop((0, 360, 2560, 1080)).save(out)  # the middle strip: 2560 x 720
 
 
-class Recording(plot.Show):
-    """A Show-me window's intro, frame by frame."""
-
-    def __init__(self, folder, **kw):
-        self.folder, self.n = folder, 0
-        super().__init__(**kw)
-
-    def emit_frame(self):
-        self.get_image().convert('RGB').save(self.folder / f'{self.n:05d}.png')
-        self.n += 1
-
-
-def gif(spec, out, seconds_after=1.5):
-    plot.cmu_serif()
-    with tempfile.TemporaryDirectory() as d:
-        scene = Recording(Path(d), spec=spec)
-        scene.setup()
-        scene.construct()
-        scene.wait(seconds_after)  # hold the last frame a little
-        # two-pass palette: smooth gradients and crisp text at a sane size
-        subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-framerate', '30', '-i', f'{d}/%05d.png', '-vf',
-                        'fps=20,scale=960:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];'
-                        '[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle', str(out)], check=True)
-
-
 if __name__ == '__main__':
-    if not shutil.which('ffmpeg'):
-        sys.exit('needs ffmpeg')
     banner(DOCS / 'banner.png')
-    gif(dict(kind='riemann', f='sin(x)', a='0', b='pi', n=32, title=r'Riemann sums for $\int_0^\pi \sin x\,dx$'), DOCS / 'showme.gif')
-    print('wrote', DOCS / 'banner.png', DOCS / 'showme.gif')
+    print('wrote', DOCS / 'banner.png')

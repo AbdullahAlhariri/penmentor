@@ -95,7 +95,7 @@ bin/penmentor --selftest                       # page analysis, text, formulas, 
 bin/penmentor --test shot.png check            # ask Claude about a saved screenshot: shot.penmentor.json and shot.penmentor.png
 bin/penmentor --render shot.png shot.penmentor.json  # redraw a saved answer without Claude (tune the visuals)
 PYTHONPATH=src ~/.local/share/penmentor/manim/bin/python -m penmentor.plot --png spec.json out.png   # one animation's last frame
-~/.local/share/penmentor/manim/bin/python docs/assets.py   # the README's banner and GIF
+~/.local/share/penmentor/manim/bin/python docs/assets.py   # the README's banner
 ```
 
 | Module | |
