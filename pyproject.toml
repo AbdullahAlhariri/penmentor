@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "penmentor"
+version = "0.2.0"
+description = "A maths mentor at the tip of your pen: Claude marks your handwritten work with hints, not answers, and shows the idea with manim."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = ["numpy", "scipy", "pillow", "PyQt6", "matplotlib"]
+keywords = ["xournal", "handwriting", "calculus", "tutor", "claude", "x11", "i3"]
+classifiers = [
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: Education",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+
+[project.urls]
+Homepage = "https://github.com/AbdullahAlhariri/penmentor"
+Issues = "https://github.com/AbdullahAlhariri/penmentor/issues"
+
+[project.optional-dependencies]
+show = ["manimgl", "audioop-lts; python_version >= '3.13'"]  # Show me: 3Blue1Brown's manim (pydub needs audioop on 3.13+)
+
+[project.scripts]
+penmentor = "penmentor.cli:run"
+
+[tool.setuptools.packages.find]
+where = ["src"]
