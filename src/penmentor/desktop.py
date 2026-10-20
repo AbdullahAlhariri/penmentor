@@ -88,6 +88,32 @@ def activate(window):
         subprocess.run(['xdotool', 'windowactivate', window], capture_output=True)
 
 
+_pointer = {}
+
+
+def pointer():
+    """(x, y, held) of the mouse or pen anywhere on the desktop (held: a button or the pen tip is down), or None.
+    The marks' window is only their own pixels, so the pointer is mostly over your app: this asks X directly."""
+    if 'x' not in _pointer:
+        try:
+            x = ctypes.CDLL('libX11.so.6')
+        except OSError:
+            return None
+        x.XOpenDisplay.restype, x.XDefaultRootWindow.restype = ctypes.c_void_p, ctypes.c_ulong
+        x.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+        P, I = ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int)
+        x.XQueryPointer.argtypes = [ctypes.c_void_p, ctypes.c_ulong, P, P, I, I, I, I, ctypes.POINTER(ctypes.c_uint)]
+        dpy = x.XOpenDisplay(None)
+        _pointer.update(x=x, dpy=dpy, root=dpy and x.XDefaultRootWindow(dpy))
+    x, dpy = _pointer['x'], _pointer['dpy']
+    if not dpy:
+        return None
+    w, i, m = [ctypes.c_ulong() for _ in range(2)], [ctypes.c_int() for _ in range(4)], ctypes.c_uint()
+    if not x.XQueryPointer(dpy, _pointer['root'], *map(ctypes.byref, w), *map(ctypes.byref, i), ctypes.byref(m)):
+        return None
+    return i[0].value, i[1].value, bool(m.value & 0x1F00)  # Button1Mask..Button5Mask
+
+
 def on_escape(callback):
     """callback() on a thread whenever Escape is pressed, wherever the focus is (other keys still reach your apps),
     so Esc stops penmentor while Claude thinks. Windows that grab the keyboard (rofi, the overlay) get their Esc themselves."""

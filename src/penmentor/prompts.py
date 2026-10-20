@@ -1,4 +1,4 @@
-"""What penmentor asks Claude, and the JSON shape Claude answers in."""
+"""What penmentor asks the model, and the JSON shape it answers in."""
 
 PRESETS = [  # rofi menu: (label, mode)
     ('✓  Did I make any mistakes?', 'check'),

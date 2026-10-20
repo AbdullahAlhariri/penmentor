@@ -9,13 +9,13 @@ import time
 
 import numpy as np
 from PyQt6.QtCore import QPointF, QRect, QRectF, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFontMetrics, QImage, QPainter, QPainterPath, QPolygonF, QRegion
+from PyQt6.QtGui import QBitmap, QColor, QFontMetrics, QImage, QPainter, QPainterPath, QPolygonF, QRegion
 from PyQt6.QtWidgets import QApplication, QWidget
 
 from . import show, xournal
-from .claude import ask, prepare
+from .harness import ask, pick, prepare
 from .config import CACHE, CONF, save, set_state
-from .desktop import Oops, activate, active_window, capture, rofi
+from .desktop import Oops, activate, active_window, capture, pointer, rofi
 from .draw import arrowhead, curve, edge, line_pts, panel, pen, qrect, ring, ring_rect, spin, tup
 from .page import Page
 from .prompts import FOLLOWUPS, MORE, TASKS, TECHNIQUES
@@ -167,12 +167,14 @@ class BoxPicker(QWidget):
 
 
 class Overlay(QWidget):
-    """Frozen frame: the screenshot plus Claude's marks, over every monitor it came from.
-    Needs no compositor and can't drift when you scroll; Esc returns to the live apps.
+    """Claude's marks over your live screen, on every monitor it looked at. The window is shaped to the marks and
+    panels themselves (an X shape: no compositor needed), so everywhere else you see and use your apps: write, scroll,
+    move windows, while the marks stay. Only Esc closes it; the bar's buttons (or the penmentor key again) do the rest.
     geom: where the shot sits on the desktop. screens (monitors) and wins (windows) are (x, y, w, h) in shot pixels;
     the panels go on screens[main], the focused monitor."""
     done = pyqtSignal(object)
     asked = pyqtSignal(object)
+    chose = pyqtSignal(object)
 
     def __init__(self, shot, geom, region=None, screens=None, main=0, wins=None, mode='check', page=None):
         # region: your boxes [(x0, y0, x1, y1)] in shot pixels, drawn on what Claude sees
@@ -183,15 +185,20 @@ class Overlay(QWidget):
         self.load(shot, screens, main, wins)
         self.result, self.items, self.read_imgs, self.head, self.head_box, self.drill = None, [], None, None, None, None
         self.busy, self.error, self.hover, self.pinned = False, None, None, None
-        self.want_plot, self.pending = mode == 'show', None  # pending: what to ask once you are done writing
-        self.app_window = active_window()  # xournal, usually: it gets the focus back when the overlay steps aside
+        self.want_plot = mode == 'show'
+        self.app_window = active_window()  # xournal, usually: it gets the focus back after the box picker had the keyboard
         self.pill, self.t0, self.end, self.tip_pos, self.pin_pos = None, time.monotonic(), 0, QPointF(0, 0), QPointF(0, 0)
         self.setGeometry(*geom)
         self.setMouseTracking(True)
         self.done.connect(self.on_done)
         self.asked.connect(self.on_asked)
+        self.chose.connect(self.on_chose)
         self.tips, self.head_img, self.legend = {}, QImage(), None
+        self.base, self.bar_items, self.bar_hover = QRegion(), [], None  # base: the shape of everything but tooltips
         self.tick = QTimer(self, interval=16, timeout=self.update)
+        QTimer(self, interval=33, timeout=self.track).start()  # hover from where the pointer is; and Python runs often
+        # enough that the signal below is heard
+        signal.signal(signal.SIGUSR1, lambda *a: QTimer.singleShot(0, self.poked))  # the penmentor key again
 
     def load(self, shot, screens, main, wins):
         """Freeze this frame. Its pages and Claude's copies are made from it lazily (the pages on a background thread)."""
@@ -249,12 +256,9 @@ class Overlay(QWidget):
             screen = show.monitor(self.screens, self.main, self.geom)
             spot = show.rect(screen)
             show.open_window(spot)  # now, so its loading animation runs while Claude thinks
-            # the frozen frame mustn't cover it: leave its whole monitor live (so you can move it or make it fullscreen);
-            # with one monitor, just the window and i3's frame round it
-            hole = QRect(*screen) if len(self.screens) > 1 else QRect(*spot).adjusted(-4, -30, 4, 4)
-            self.setMask(QRegion(self.rect()).subtracted(QRegion(hole.translated(-self.geom[0], -self.geom[1]))))
         if self.isVisible():
             self.tick.start()
+            self.reshape()  # the headline turns into "Thinking"
         else:
             self.pill = Pill(self.shot, self.top_geom())
             self.pill.show()
@@ -275,11 +279,13 @@ class Overlay(QWidget):
         self.busy = False
         if self.want_plot:
             self.want_plot = False
-            show.send(spec=r['plot']) if r.get('plot') else show.send(error=r.get('error') or "Claude didn't send an animation this time.")
+            show.send(spec=r['plot']) if r.get('plot') else show.send(error=r.get('error') or 'No animation came with this answer.')
         if 'error' in r:
             if self.isVisible():
                 self.error = r['error']
+                self.reshape()
                 self.update()
+                set_state(f'open {os.getpid()}')
             else:
                 self.pill.fail(r['error'])
             return
@@ -290,11 +296,35 @@ class Overlay(QWidget):
         self.set_result(r)
         if not self.isVisible():
             self.present()
+        set_state(f'open {os.getpid()}')  # the penmentor key opens the marks' menu again
 
     def present(self):
+        """Show the marks without taking the keyboard: it stays with the app you were writing in."""
+        self.reshape()
         self.show()
         self.raise_()
-        QTimer.singleShot(80, lambda: (self.activateWindow(), self.grabKeyboard()))
+        set_state(f'open {os.getpid()}')
+
+    def reshape(self):
+        """The window becomes exactly what is drawn on it (every mark at its end state, the panels): your live screen
+        shows everywhere else and the pen reaches the app below. Pixels with any coverage count, so edges stay smooth."""
+        img = QImage(self.size(), QImage.Format.Format_ARGB32)
+        img.fill(0)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.paint_layer(p, math.inf, tips=False)
+        p.end()
+        a = np.frombuffer(img.bits().asarray(img.sizeInBytes()), np.uint8).reshape(img.height(), img.bytesPerLine() // 4, 4)
+        a[..., 3] = np.where(a[..., 3] > 0, 255, 0)  # createAlphaMask thresholds at half: keep the faint antialiased edge
+        self.base = QRegion(QBitmap.fromImage(img.createAlphaMask()))
+        self.apply_shape()
+
+    def apply_shape(self):
+        """base plus the tooltip, which moves with the pointer (cheap: a rectangle)."""
+        shape = QRegion(self.base)
+        if why := self.pinned or self.hover:
+            shape = shape.united(QRegion(self.tip_rect(why, self.pin_pos if self.pinned else self.tip_pos)[0].toAlignedRect().adjusted(-2, -2, 2, 2)))
+        self.setMask(shape)
 
     # --- turning the answer into drawables ---
     def set_result(self, r):
@@ -397,6 +427,7 @@ class Overlay(QWidget):
         self.items = sorted(items, key=lambda d: d['layer'])
         self.end = max([d['t'] + d['dur'] for d in items], default=0) + .1
         self.replay()
+        self.reshape()
 
     def replay(self):
         self.t0 = time.monotonic()
@@ -407,10 +438,14 @@ class Overlay(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        p.drawImage(0, 0, self.shot)
+        p.drawImage(0, 0, self.shot)  # under the marks: their soft edges blend onto what was there
         now = time.monotonic() - self.t0
         if now > self.end and not self.busy:
             self.tick.stop()
+        self.paint_layer(p, now)
+
+    def paint_layer(self, p, now, tips=True):
+        """Everything penmentor draws, as of `now` seconds into the marks' animation (inf: the end)."""
         dim = .3 if self.busy else 1
         for d in self.items:
             k = min(1, max(0, (now - d['t']) / d['dur']))
@@ -423,7 +458,7 @@ class Overlay(QWidget):
             self.draw_drill(p)
         self.draw_headline(p)
         why = self.pinned or self.hover
-        if why:
+        if why and tips:
             self.draw_tip(p, why)
         if CONF['read']:
             self.draw_read(p)
@@ -526,16 +561,14 @@ class Overlay(QWidget):
         else:
             p.drawText(box.adjusted(22, 0, 0, 0), Qt.AlignmentFlag.AlignVCenter, icon)
         p.drawImage(QPointF(box.left() + 22 + fm.horizontalAdvance(icon + '   '), box.center().y() - img.height() / 2), img)
-        f.setPixelSize(15)
-        p.setFont(f)
-        self.draw_bar(p, f, self.keys(), right=True)
+        self.draw_actions(p)
         if CONF['stats']:
             self.draw_stats(p)
 
     def stats(self):
         """Bottom-left panel: (rect, label column width, rows). A row is (label, text, bar fraction or None); None is a gap."""
         r = self.result or {}
-        rows = [('model', CONF['model'], None), ('effort', CONF['effort'], None), ('context', CONF['context'], None)]
+        rows = [('model', ':'.join(pick()), None), ('effort', CONF['effort'], None), ('context', CONF['context'], None)]
         n, cached, *total = r.get('_tokens') or [None, None]
         run = [('took', f"{r['_secs']:.1f} s", None)] if '_secs' in r else []
         if n is not None:
@@ -579,14 +612,24 @@ class Overlay(QWidget):
             p.drawText(QRectF(x, y, r.right() - x, 22), Qt.AlignmentFlag.AlignVCenter, text)
             y += 22
 
-    def draw_bar(self, p, f, text, right):
-        w = QFontMetrics(f).horizontalAdvance(text) + 24
-        r = QRectF(self.M.right() - w - 12 if right else self.M.left() + 12, self.M.bottom() - 36, w, 28)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(18, 18, 22, 210))
-        p.drawRoundedRect(r, 14, 14)
-        p.setPen(QColor(170, 170, 180))
-        p.drawText(r, Qt.AlignmentFlag.AlignCenter, text)
+    def draw_actions(self, p):
+        """The bar of buttons, bottom right: tap one with the pen (the penmentor key opens the same as a menu)."""
+        f = ui_font(15)
+        fm = QFontMetrics(f)
+        acts = self.actions()
+        widths = [fm.horizontalAdvance(label) + 26 for label, _ in acts]
+        x, y = self.M.right() - sum(widths) - 4 * (len(acts) - 1) - 12, self.M.bottom() - 36
+        p.setFont(f)
+        self.bar_items = []
+        for (label, act), w in zip(acts, widths):
+            r, hot = QRectF(x, y, w, 28), self.bar_hover == label
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(48, 48, 58, 240) if hot else QColor(18, 18, 22, 215))
+            p.drawRoundedRect(r, 14, 14)
+            p.setPen(QColor(238, 238, 242) if hot and not self.busy else QColor(170, 170, 180))
+            p.drawText(r, Qt.AlignmentFlag.AlignCenter, label)
+            self.bar_items.append((r, label, act))
+            x += w + 4
 
     def tip_rect(self, text, pos):
         if text not in self.tips:
@@ -625,94 +668,116 @@ class Overlay(QWidget):
 
     # --- input ---
     def mouseMoveEvent(self, e):
-        old, self.tip_pos = self.tip_pos, e.position()
-        if self.drill:
-            if (row := self.drill_row(self.tip_pos)) != self.drill['hover']:
-                self.drill['hover'] = row
-                self.update()
-            return
-        hit = next((why for o, why in self.hits if o.contains(self.tip_pos)), None) if self.result else None
-        hit = hit or next((d['why'] for d in self.items if d['kind'] == 'bubble' and d.get('why')
-                           and d['rect'].contains(self.tip_pos)), None)
+        """Over what we drew (the window is shaped): light a button or a drill row; marks' whys come from hover_at."""
+        pos = e.position()
+        bar = next((label for r, label, _ in self.bar_items if r.contains(pos)), None)
+        if bar != self.bar_hover:
+            self.bar_hover = bar
+            self.update()
+        row = self.drill_row(pos) if self.drill else None
+        if self.drill and row != self.drill['hover']:
+            self.drill['hover'] = row
+            self.update()
+        head = self.mode == 'technique' and self.head_box and self.head_box.contains(pos)
+        self.setCursor(Qt.CursorShape.PointingHandCursor if bar or row is not None or head or self.hover else Qt.CursorShape.ArrowCursor)
+        self.hover_at(pos)
+
+    def track(self):
+        """Hover a mark, anywhere over it, for its why, as before the marks went live: the window is only their pixels,
+        so the pointer is usually over your app and we never hear of it. Ask X where it is instead (a hovering pen
+        moves it too); while you draw (a button or the pen tip down) no tooltip pops up."""
+        where = pointer()
+        if where and self.isVisible():
+            x, y, held = where
+            self.hover_at(QPointF(x - self.geom[0], y - self.geom[1]), held)
+
+    def hover_at(self, pos, held=False):
+        old, self.tip_pos = self.tip_pos, pos
+        hit = None
+        if self.result and not self.drill and not held:
+            hit = next((why for o, why in self.hits if o.contains(pos)), None) or next(
+                (d['why'] for d in self.items if d['kind'] == 'bubble' and d.get('why') and d['rect'].contains(pos)), None)
         if hit != self.hover:
             self.hover = hit
+            self.apply_shape()
             self.update()
-        elif hit and not self.pinned:  # the tip follows the cursor: repaint only where it was and where it goes
-            for pos in (old, self.tip_pos):
-                self.update(self.tip_rect(hit, pos)[0].toAlignedRect().adjusted(-2, -2, 2, 2))
+        elif hit and not self.pinned and pos != old:  # the tip follows the pointer: repaint where it was and where it goes
+            self.apply_shape()
+            for p in (old, pos):
+                self.update(self.tip_rect(hit, p)[0].toAlignedRect().adjusted(-2, -2, 2, 2))
+
+    def leaveEvent(self, e):
+        if self.bar_hover:  # the marks' whys follow the pointer anyway (track)
+            self.bar_hover = None
+            self.update()
 
     def mousePressEvent(self, e):
+        """A tap acts on what it hits. Nothing makes the marks go away but Esc (or the close button)."""
         self.tip_pos = e.position()
-        if e.button() == Qt.MouseButton.RightButton:
-            self.close()
-        elif self.drill:  # pen taps miss: in a drill only Esc or right-click closes
-            if (row := self.drill_row(self.tip_pos)) is not None:
-                self.pick_line(row)
+        if item := next(((label, act) for r, label, act in self.bar_items if r.contains(self.tip_pos)), None):
+            if not self.busy or item[0].startswith('close'):
+                item[1]()
+        elif self.drill and (row := self.drill_row(self.tip_pos)) is not None:
+            self.pick_line(row)
         elif self.mode == 'technique' and not self.busy and self.head_box and self.head_box.contains(self.tip_pos):
             self.pick_technique()
-        elif not self.hover:
-            self.close()
-        else:  # tap a mark to pin its "why" (pens don't hover well)
+        elif self.hover:  # tap a mark to pin its "why" (pens don't hover well)
             self.pinned, self.pin_pos = None if self.pinned == self.hover else self.hover, self.tip_pos
-            self.update()
-
-    def keyPressEvent(self, e):
-        t = e.text()
-        hyper = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ShiftModifier
-        pad = {Qt.Key.Key_M: 'check', Qt.Key.Key_S: 'final'}.get(e.key()) if e.modifiers() & hyper == hyper else None
-        if e.key() in (Qt.Key.Key_Escape, Qt.Key.Key_Q):
-            self.close()
-        elif self.busy:
-            return
-        elif pad:  # a tablet button while this is open: we hold the keyboard, so i3 never sees it; ask here
-            self.followup(TASKS[pad])
-        elif t == 'h':
-            self.followup(MORE)
-        elif t == '?':
-            self.ask_rofi(FOLLOWUPS, 'follow-up')
-        elif t == 'p' and self.mode == 'technique':
-            self.pick_technique()
-        elif t == 'n' and self.drill:
-            self.followup(TASKS['drill_more'])
-        elif t == 'g':
-            self.pick_then_show()
-        elif t == 'a' and self.mode == 'why':
-            self.ask_rofi([], 'your answer', TASKS['why_typed'])
-        elif t == 'w':
-            self.write_then(TASKS['why_written' if self.mode == 'why' else 'written'])
-        elif t == 'r':
-            self.replay()
-        elif t in ('s', 't'):
-            key = 'stats' if t == 's' else 'read'
-            save(**{key: not CONF[key]})
+            self.apply_shape()
             self.update()
 
     def on_asked(self, q):
         if q is None:  # Esc in rofi stops penmentor, like Esc anywhere else
             return self.close()
-        self.activateWindow()
-        self.grabKeyboard()
         if q:
             self.followup(q)
 
     def closeEvent(self, e):
-        activate(self.app_window)
         QApplication.quit()
 
     # --- the modes ---
-    def keys(self):
+    def actions(self):
+        """What you can do next: the bar's buttons, and the menu the penmentor key opens. (label, what it does)"""
         if self.drill:
-            return 'tap the wrong line   ·   n new drill   ·   esc close'
-        k = {'technique': ['p pick the technique'], 'why': ['a type answer', 'w write answer']}.get(self.mode, ['w write more'])
-        return '   ·   '.join(k + ['h more help', '? ask', 'g show me', 't what I read', 's stats', 'r replay', 'esc close'])
+            first = [('new drill', lambda: self.followup(TASKS['drill_more']))]
+        else:
+            first = {'technique': [('pick the technique', self.pick_technique)],
+                     'why': [('type your answer', lambda: self.ask_rofi([], 'your answer', TASKS['why_typed'])),
+                             ('check what I wrote', lambda: self.check_new(TASKS['why_written']))]}.get(
+                self.mode, [('check new work', lambda: self.check_new(TASKS['written']))])
+        return first + [('more help', lambda: self.followup(MORE)), ('ask…', lambda: self.ask_rofi(FOLLOWUPS, 'follow-up')),
+                        ('show me', self.pick_then_show), ('what I read', lambda: self.toggle('read')),
+                        ('stats', lambda: self.toggle('stats')), ('replay', self.replay), ('close · esc', self.close)]
+
+    def toggle(self, key):
+        save(**{key: not CONF[key]})
+        self.reshape()
+        self.update()
+
+    def poked(self):
+        """The penmentor key (or a pad button) while the marks are up: the actions as a menu, or straight to that question."""
+        try:
+            what = (CACHE / 'poke').read_text().strip()
+        except OSError:
+            what = 'menu'
+        if self.busy:
+            return
+        if what in TASKS:  # a pad button: that question about the work as it is now (you have probably written more)
+            return self.check_new(TASKS[what])
+        rows = [label for label, _ in self.actions()]
+        threading.Thread(target=lambda: self.chose.emit(rofi(rows, 'penmentor')), daemon=True).start()
+
+    def on_chose(self, label):
+        if label is None:  # Esc: as everywhere
+            return self.close()
+        act = dict(self.actions()).get(label)
+        if act:
+            act()
 
     def pick_then_show(self):
-        """g: box what to show on this frame, then Claude animates it (no boxes: what the problem is about)."""
-        self.releaseKeyboard()
-
+        """Show me: box what to show on this frame, then Claude animates it (no boxes: what the problem is about)."""
         def chosen(boxes):
-            self.activateWindow()
-            self.grabKeyboard()
+            activate(self.app_window)  # the picker had the keyboard; give it back to the app
             self.region, self.want_plot = boxes, True
             self.cache.pop('shots', None)  # redraw what Claude sees, with the boxes
             self.request(TASKS['show_boxes' if boxes else 'show'], new_shot=bool(boxes) or self.result is None)
@@ -721,8 +786,7 @@ class Overlay(QWidget):
 
     def ask_rofi(self, rows, prompt, template='{}'):
         """A rofi pick (or typed text) turned into a follow-up. No rows: just a text box."""
-        self.releaseKeyboard()  # only reaches X once we are back in the event loop, so rofi runs on a thread
-        def pick():
+        def pick():  # on a thread: rofi waits for you, the marks keep drawing
             c = rofi(rows, prompt)
             self.asked.emit(None if c is None else c and template.format(c))  # None: Esc
         threading.Thread(target=pick, daemon=True).start()
@@ -730,26 +794,10 @@ class Overlay(QWidget):
     def pick_technique(self):
         self.ask_rofi(TECHNIQUES, 'technique', TASKS['pick'])
 
-    def write_then(self, task):
-        """Step aside so you can write on the real page; ask `task` about the new screen once you tap the badge."""
-        self.pending = task
-        self.releaseKeyboard()
+    def check_new(self, task):
+        """Check what you wrote since: the marks step aside for the screenshot, then come back with the answer."""
         self.hide()
-        activate(self.app_window)  # so your keys reach xournal again, and so does the page-export shortcut
-        self.pill = Pill(self.shot, self.top_geom(), 'Done writing? Tap here', self.retake, busy=False)
-        self.pill.show()
-        set_state(f'waiting {os.getpid()}')
-        signal.signal(signal.SIGUSR1, lambda *a: QTimer.singleShot(0, self.retake))  # pressing an penmentor key again = done too
-        QTimer.singleShot(30 * 60 * 1000, lambda: self.pending and QApplication.quit())  # nobody came back
-
-    def retake(self):
-        if not self.pending or not self.pill:
-            return
-        task, self.pending = self.pending, None
-        signal.signal(signal.SIGUSR1, signal.SIG_IGN)
-        self.pill.close()
-        self.pill = None
-        QTimer.singleShot(150, lambda: self.reshoot(task))  # let X repaint under the badge before the screenshot
+        QTimer.singleShot(150, lambda: self.reshoot(task))  # let X repaint where the marks were
 
     def reshoot(self, task):
         try:
@@ -800,11 +848,11 @@ class Overlay(QWidget):
             text = 'Found it' if d['found'] else f"It was line {(d['wrong'] or 0) + 1}"
             self.result = dict(self.result, headline=text, verdict='correct' if d['found'] else 'mistake')
             self.head_img = tex(text, 'white', HEAD)
+        self.reshape()
         self.update()
 
     def draw_drill(self, p):
         d, pal = self.drill, self.pal
-        p.fillRect(self.rect(), QColor(0, 0, 0, 150))  # the drill is not your page: push the page back
         c = d['card']
         panel(p, c, 14, 255)
         p.drawImage(QPointF(c.left() + d['pad'], c.top() + d['pad']), d['prob'])

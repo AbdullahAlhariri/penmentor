@@ -694,7 +694,7 @@ class Show(Scene):
             if (parent and os.getppid() != parent) or time.monotonic() > end:  # penmentor stopped (Esc) before Claude answered
                 break
             self.wait(.1)
-        got = json.loads(spec_file.read_text()) if spec_file.exists() else {'error': 'Stopped before Claude answered.'}
+        got = json.loads(spec_file.read_text()) if spec_file.exists() else {'error': 'Stopped before the answer came.'}
         arc.clear_updaters()
         self.play(FadeOut(VGroup(ring, arc, word)), run_time=.4)
         return got.get('spec') or {'error': got.get('error') or 'no animation this time'}

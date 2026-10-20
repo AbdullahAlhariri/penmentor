@@ -151,7 +151,7 @@ def overlay():
     assert (display(drill['fix']), 19) in tex_jobs(r)
     ov.set_result(r)
     d = ov.drill
-    assert len(d['rows']) == 4 and 'tap the wrong line' in ov.keys()
+    assert len(d['rows']) == 4 and ov.actions()[0][0] == 'new drill'
     centre = lambda i: d['rows'][i][0].center()
     assert ov.drill_row(centre(1)) == 1 and ov.drill_row(QPointF(-5, -5)) is None
     ov.pick_line(0)
@@ -165,7 +165,11 @@ def overlay():
     tech = Overlay(shot, (0, 0, 1200, 800), mode='technique')
     tech.set_result(dict(read_as=[], verdict='hint', headline='Which technique fits?', marks=[]))
     tech.grab()
-    assert tech.drill is None and tech.keys().startswith('p pick') and tech.head_box is not None
+    assert tech.drill is None and tech.actions()[0][0] == 'pick the technique' and tech.head_box is not None
+    # the marks sit on the live screen: the window is shaped to what is drawn, everything else stays the apps'
+    from PyQt6.QtCore import QPoint
+    assert not tech.base.isEmpty() and not tech.base.contains(QPoint(60, 400)) and tech.base.contains(tech.head_box.center().toPoint())
+    assert [label for _, label, _ in tech.bar_items][-1] == 'close · esc'  # the bar's buttons were laid out
     pill = Pill(tech.shot, (0, 0, 1200, 800))
     assert not pill.grab().isNull()
 
@@ -193,32 +197,91 @@ def page_export():
 def stopping():
     """Esc kills a claude that is still answering instead of leaving it running on your plan."""
     import threading
-    from . import claude
+    from . import harness
     with tempfile.TemporaryDirectory() as d:
-        stub, saved, failed = Path(d) / 'claude', claude.CLAUDE, []
+        stub, saved, failed = Path(d) / 'claude', harness.BIN['claude'], []
         stub.write_text('#!/bin/sh\nexec sleep 30\n')
         stub.chmod(0o755)
-        claude.CLAUDE = str(stub)
+        harness.BIN['claude'] = str(stub)
         def ask():
             try:
-                claude.ask([], 'hi', keep=False)
+                harness.ask([], 'hi', keep=False)
             except RuntimeError:
                 failed.append(True)
         try:
             t = threading.Thread(target=ask)
             t.start()
             for _ in range(300):
-                if claude.RUNNING:
+                if harness.RUNNING:
                     break
                 time.sleep(.01)
-            claude.stop()
+            harness.stop()
             t.join(5)
-            assert not t.is_alive() and failed and not claude.RUNNING
+            assert not t.is_alive() and failed and not harness.RUNNING
         finally:
-            claude.CLAUDE = saved
+            harness.BIN['claude'] = saved
+
+
+STUB = r"""#!/usr/bin/env python3
+import json, os, sys
+open(os.environ['PM_LOG'], 'a').write(json.dumps({'argv': sys.argv, 'stdin': sys.stdin.read()}) + '\n')
+answer = {'read_as': [], 'verdict': 'correct', 'headline': 'ok', 'marks': []}
+name = os.path.basename(sys.argv[0])
+if name == 'claude':
+    print(json.dumps({'type': 'result', 'structured_output': answer, 'usage': {'input_tokens': 5, 'output_tokens': 2}}))
+elif name == 'agy':
+    print(json.dumps({'event': 'init', 'conversation_id': 'conv-1'}))
+    print(json.dumps({'event': 'result', 'result': {'status': 'SUCCESS', 'conversation_id': 'conv-1', 'structured_output': answer,
+                                                    'usage': {'total_tokens': 7}}}))
+else:
+    print(json.dumps({'type': 'thread.started', 'thread_id': 'thr-1'}))
+    print(json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': json.dumps(dict(answer, drill=None, plot=None))}}))
+    print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 5, 'output_tokens': 2}}))
+"""
+
+
+def harnesses():
+    """Claude Code, Antigravity and Codex, played by stand-ins that answer in each one's own format: the same answer
+    shape whichever runs it, follow-ups resume that harness's conversation, switching harness starts a new one."""
+    from . import config, harness
+    saved = dict(harness.BIN), harness.SESSION, harness.TURN, harness.CACHE, dict(config.CONF)
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        log = d / 'log.jsonl'
+        os.environ['PM_LOG'] = str(log)
+        for h in harness.HARNESSES:
+            (d / h).write_text(STUB)
+            (d / h).chmod(0o755)
+            harness.BIN[h] = str(d / h)
+        harness.SESSION, harness.TURN, harness.CACHE = d / 'session.json', d / 'turn', d
+        shot = harness.prepare(__import__('PIL.Image').Image.new('RGB', (40, 30), 'white'))
+        calls = lambda: [json.loads(l) for l in log.read_text().splitlines()]
+        try:
+            assert harness.pick('codex:gpt-x') == ('codex', 'gpt-x') and harness.pick('opus') == ('claude', 'opus')
+            for h, resumes in (('claude', '--resume'), ('agy', '--conversation'), ('codex', 'resume')):
+                config.CONF['model'] = f'{h}:m'
+                r = harness.ask([shot], 'is it right?')
+                assert r['headline'] == 'ok' and 'drill' not in r and r['_tokens'][0] > 0, (h, r)
+                assert json.loads(harness.SESSION.read_text())['harness'] == h
+                first = calls()[-1]
+                strict = json.loads((d / 'turn' / 'schema.json').read_text()) if h == 'codex' else None
+                harness.ask([shot], 'and now?', new_shot=False)  # a follow-up: the same conversation
+                assert resumes in calls()[-1]['argv'], (h, calls()[-1]['argv'])
+                if h == 'agy':  # its print mode takes text only: the screenshot is a file it is told to open
+                    assert str(d / 'turn' / 'image1.png') in first['stdin'] and '--sandbox' in first['argv']
+                if h == 'codex':  # attached by Codex; its schema strict (every key required)
+                    assert f"--image={d / 'turn' / 'image1.png'}" in first['argv']
+                    assert set(strict['required']) == set(strict['properties']) and '--sandbox' in first['argv']
+            config.CONF['model'] = 'agy:m'  # a codex conversation can't continue in agy: a new one, screenshots included
+            harness.ask([shot], 'and now?', new_shot=False)
+            assert '--conversation' not in calls()[-1]['argv'] and 'image1.png' in calls()[-1]['stdin']
+        finally:
+            harness.BIN.update(saved[0])
+            harness.SESSION, harness.TURN, harness.CACHE = saved[1:4]
+            config.CONF.clear(), config.CONF.update(saved[4])
 
 
 def selftest():
-    for check in (pages, text, desktop, menus, formulas, plots, overlay, page_export, stopping):
+    for check in (pages, text, desktop, menus, formulas, plots, overlay, page_export, stopping, harnesses):
         check()
     print('selftest ok')
