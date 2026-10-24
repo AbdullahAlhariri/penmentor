@@ -1,8 +1,7 @@
 <p align="center"><img src="docs/banner.png" alt="penmentor" width="100%"></p>
 
 <p align="center">
-A maths mentor at the tip of your pen. Press a key while you work by hand: Claude, Gemini or GPT marks your work on the<br>
-screen like a teacher with coloured pens, gives you hints instead of answers, and shows the idea as a 3Blue1Brown-style animation.
+A maths mentor at the tip of your pen. Press a key while you work by hand: Claude, Gemini or GPT marks your work on the screen like a teacher with coloured pens, gives you hints instead of answers, and shows the idea as a 3Blue1Brown-style animation.
 </p>
 
 <p align="center"><img src="docs/demo.gif" alt="Writing an integral in xournal++, penmentor marking the sign slip, then animating the area" width="860"><br>
@@ -49,6 +48,16 @@ git clone https://github.com/AbdullahAlhariri/penmentor ~/src/penmentor
 
 Linux on X11 (best with i3), with one of those agents logged in (`claude`, `codex` or `agy`), plus `rofi`, `slop`,
 `xdotool` and PyQt6. Bind `bin/penmentor` to a key ([example](contrib/i3.conf)). Setup, keys and how it works: [the guide](docs/guide.md).
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=abdullahalhariri%2Fpenmentor&type=date&legend=bottom-right">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=abdullahalhariri/penmentor&type=date&theme=dark&logscale&legend=bottom-right" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=abdullahalhariri/penmentor&type=date&logscale&legend=bottom-right" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=abdullahalhariri/penmentor&type=date&logscale&legend=bottom-right" />
+ </picture>
+</a>
 
 ## License
 
